@@ -193,7 +193,15 @@ def regress(goal_set: State, action: Action) -> State | None:
          Check relevance first, then check for contradictions, then compute.
     """
     ### Your code here ###
-
+    add_set = frozenset(action.add_list)
+    del_set = frozenset(action.del_list)
+    precond_set = frozenset(action.precond_pos)
+    if not (add_set & goal_set):
+        return None
+    if del_set & goal_set:
+        return None
+    new_goal = (goal_set - add_set) | (precond_set - add_set)
+    return frozenset(new_goal)
     ### End of your code ###
 
 
@@ -216,7 +224,64 @@ def backwardSearch(problem: Problem) -> list[Action]:
          Pickable) that are false in the initial state — these are dead ends.
     """
     ### Your code here ###
-
+    from collections import deque
+    start_goal = frozenset(problem.goal)
+    frontier = deque()
+    frontier.append((start_goal, []))
+    visited = set()
+    all_actions = get_all_groundings(problem.domain, problem.objects)
+    while frontier:
+        problem._expanded += 1
+        current_goal, plan = frontier.popleft()
+        if current_goal in visited:
+            continue
+        visited.add(current_goal)
+        if current_goal.issubset(problem.initial_state):
+            return list(reversed(plan))
+        for action in all_actions:
+            add_set = frozenset(action.add_list)
+            if not (add_set & current_goal):
+                continue
+            new_goal = regress(current_goal, action)
+            if new_goal is None:
+                continue
+            robot_positions = set()
+            holding_objects = set()
+            object_positions = {}
+            handsfree = False
+            contradiction = False
+            for fluent in new_goal:
+                pred = fluent[0]
+                if pred in {"MedicalPost", "Adjacent", "Pickable"}:
+                    if fluent not in problem.initial_state:
+                        contradiction = True
+                        break
+                if pred == "At":
+                    entity = fluent[1]
+                    location = fluent[2]
+                    if entity == "robot":
+                        robot_positions.add(location)
+                    else:
+                        if entity in object_positions:
+                            if object_positions[entity] != location:
+                                contradiction = True
+                                break
+                        object_positions[entity] = location
+                elif pred == "Holding":
+                    obj = fluent[2]
+                    holding_objects.add(obj)
+                elif pred == "HandsFree":
+                    handsfree = True
+            if len(robot_positions) > 1:
+                contradiction = True
+            if holding_objects and handsfree:
+                contradiction = True
+            if contradiction:
+                continue
+            if new_goal in visited:
+                continue
+            frontier.append((frozenset(new_goal), plan + [action]))
+    return []
     ### End of your code ###
 
 

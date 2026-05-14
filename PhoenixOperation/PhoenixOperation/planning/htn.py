@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections import deque
+
 from planning.pddl import Action, Problem, apply_action, is_applicable
+from planning.domain import MOVE, PICKUP, PUTDOWN, RESCUE, SETUP_SUPPLIES
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +65,29 @@ def hierarchicalSearch(problem: Problem, hlas: list[HLA]) -> list[Action]:
            2. Executing it from the initial state reaches a goal state.
          To simulate execution, apply each action in order using apply_action().
     """
-    ### Your code here ###
+    queue = deque([list(hlas)])
 
-    ### End of your code ###
+    while queue:
+        plan = queue.popleft()
+
+        if is_plan_primitive(plan):
+            state = problem.initial_state
+            for action in plan:
+                if not is_applicable(state, action):
+                    break
+                state = apply_action(state, action)
+            else:
+                if problem.isGoalState(state):
+                    return plan
+            continue
+
+        for i, step in enumerate(plan):
+            if not is_primitive(step):
+                for refinement in step.refinements:
+                    queue.append(plan[:i] + list(refinement) + plan[i + 1:])
+                break
+
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +111,91 @@ def build_htn_hierarchy(problem: Problem) -> list[HLA]:
          adjacent cells. PrepareSupplies and ExtractPatient chain Navigate HLAs
          with primitive PickUp, SetupSupplies, PutDown, and Rescue actions.
     """
-    ### Your code here ###
+    robot = problem.objects["robots"][0]
+    cells = problem.objects["cells"]
+    supplies = problem.objects["supplies"]
+    patients = problem.objects["patients"]
+    medical_posts = problem.objects["medical_posts"]
 
-    ### End of your code ###
+    if not supplies or not patients or not medical_posts:
+        return []
+
+    adj: dict = {c: [] for c in cells}
+    supply_pos: dict = {}
+    patient_pos: dict = {}
+    robot_pos = None
+
+    for fluent in problem.initial_state:
+        if fluent[0] == "Adjacent":
+            adj[fluent[1]].append(fluent[2])
+        elif fluent[0] == "At":
+            if fluent[1] == robot:
+                robot_pos = fluent[2]
+            elif fluent[1] in supplies:
+                supply_pos[fluent[1]] = fluent[2]
+            elif fluent[1] in patients:
+                patient_pos[fluent[1]] = fluent[2]
+
+    if robot_pos is None:
+        return []
+
+    def shortest_path(start, end):
+        if start == end:
+            return [start]
+        visited = {start}
+        q: deque = deque([[start]])
+        while q:
+            path = q.popleft()
+            for nxt in adj[path[-1]]:
+                if nxt not in visited:
+                    new_path = path + [nxt]
+                    if nxt == end:
+                        return new_path
+                    visited.add(nxt)
+                    q.append(new_path)
+        return []
+
+    navigate: dict = {}
+    for fc in cells:
+        for tc in cells:
+            path = shortest_path(fc, tc)
+            if len(path) <= 1:
+                refs: list = [[]] if fc == tc else []
+            else:
+                moves = [
+                    MOVE.ground({"r": robot, "from_cell": path[i], "to_cell": path[i + 1]})
+                    for i in range(len(path) - 1)
+                ]
+                refs = [moves]
+            navigate[(fc, tc)] = HLA(f"Navigate({fc},{tc})", refinements=refs)
+
+    missions: list[HLA] = []
+    current_pos = robot_pos
+
+    for s, p in zip(supplies, patients):
+        m = medical_posts[0]
+        s_pos = supply_pos.get(s)
+        p_pos = patient_pos.get(p)
+        if s_pos is None or p_pos is None:
+            continue
+
+        pickup_s = PICKUP.ground({"r": robot, "obj": s, "loc": s_pos})
+        setup = SETUP_SUPPLIES.ground({"r": robot, "s": s, "loc": m})
+        prepare_hla = HLA(f"PrepareSupplies({s},{m})", refinements=[
+            [navigate[(current_pos, s_pos)], pickup_s, navigate[(s_pos, m)], setup]
+        ])
+
+        pickup_p = PICKUP.ground({"r": robot, "obj": p, "loc": p_pos})
+        putdown_p = PUTDOWN.ground({"r": robot, "obj": p, "loc": m})
+        extract_hla = HLA(f"ExtractPatient({p},{m})", refinements=[
+            [navigate[(m, p_pos)], pickup_p, navigate[(p_pos, m)], putdown_p]
+        ])
+
+        rescue = RESCUE.ground({"r": robot, "p": p, "loc": m})
+        mission = HLA(f"FullRescueMission({s},{p},{m})", refinements=[
+            [prepare_hla, extract_hla, rescue]
+        ])
+        missions.append(mission)
+        current_pos = m
+
+    return missions
